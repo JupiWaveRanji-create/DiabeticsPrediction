@@ -1,0 +1,278 @@
+---
+title: "Diabetes Analysis"
+author: "Ranjith Ambalakandy Kanakarajan"
+date: "2026-03-20"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(caret)
+library(smotefamily)
+library(pROC)
+```
+
+```{r load-data}
+diabetes <- read.csv("diabetes_012_health_indicators_BRFSS2015.csv")
+```
+
+```{r wrangle}
+diabetes_bin <- diabetes %>%
+  mutate(Diabetes_012 = factor(Diabetes_012,
+                               levels = c(0, 1, 2),
+                               labels = c("None", "Prediabetes", "Diabetes"))) %>%
+  filter(Diabetes_012%in% c("None", "Diabetes")) %>%
+  mutate(Diabetes_012 = droplevels(Diabetes_012))
+```
+
+```{r split}
+set.seed(42)
+idx        <- createDataPartition(diabetes_bin$Diabetes_012, p = 0.8, list = FALSE)
+train_data <- diabetes_bin[idx, ]
+test_data  <- diabetes_bin[-idx, ]
+cat("Train:", nrow(train_data), "| Test:", nrow(test_data))
+```
+
+```{r smote}
+train_numeric <- train_data %>%
+  mutate(across(where(is.factor), as.numeric))
+
+smote_result <- SMOTE(
+  X        = train_numeric %>% select(-Diabetes_012),
+  target   = train_numeric$Diabetes_012,
+  K        = 5,
+  dup_size = 0
+)
+
+train_balanced <- smote_result$data %>%
+  rename(Diabetes_012 = class) %>%
+  mutate(Diabetes_012 = factor(
+    round(as.numeric(Diabetes_012)),
+    levels = c(1, 2),
+    labels = c("None", "Diabetes")
+  ))
+
+table(train_balanced$Diabetes_012)
+```
+
+
+```{r balanced-model}
+# Retrain logistic regression on balanced data
+balanced_model <- glm(Diabetes_012 ~ .,
+                      data   = train_balanced,
+                      family = binomial)
+
+# Predict on the REAL test data
+pred_prob2  <- predict(balanced_model, newdata = test_data, type = "response")
+pred_class2 <- factor(ifelse(pred_prob2 > 0.5, "Diabetes", "None"),
+                      levels = c("None", "Diabetes"))
+
+# Evaluate
+confusionMatrix(pred_class2, test_data$Diabetes_012, positive = "Diabetes")
+```
+```{r}
+# After rf_model is trained:
+varImpPlot(rf_model,
+           main = "Random Forest — Variable Importance",
+           col  = "steelblue")
+```
+
+
+
+```{r random-forest}
+install.packages("randomForest")  # run in Console first if not installed
+library(randomForest)
+
+set.seed(42)
+rf_model <- randomForest(Diabetes_012 ~ .,
+                         data       = train_balanced,
+                         ntree      = 100,
+                         importance = TRUE)
+
+# Evaluate on test data
+rf_probs  <- predict(rf_model, newdata = test_data, type = "prob")[, "Diabetes"]
+rf_class  <- predict(rf_model, newdata = test_data, type = "class")
+
+confusionMatrix(rf_class, test_data$Diabetes_012, positive = "Diabetes")
+```
+
+```{r random-forest-fixed}
+
+library(randomForest)
+
+# Ensure all categorical variables are proper factors in BOTH datasets
+cols_to_factor <- c("HighBP","HighChol","CholCheck","Smoker","Stroke",
+                    "HeartDiseaseorAttack","PhysActivity","Fruits","Veggies",
+                    "HvyAlcoholConsump","AnyHealthcare","NoDocbcCost",
+                    "DiffWalk","Sex")
+
+train_rf <- train_balanced %>%
+  mutate(across(all_of(cols_to_factor), factor))
+
+test_rf <- test_data %>%
+  mutate(across(all_of(cols_to_factor), factor))
+
+# Train Random Forest on fixed data
+set.seed(42)
+rf_model2 <- randomForest(Diabetes_012 ~ .,
+                          data       = train_rf,
+                          ntree      = 100,
+                          importance = TRUE)
+
+# Evaluate
+rf_class2 <- predict(rf_model2, newdata = test_rf, type = "class")
+confusionMatrix(rf_class2, test_rf$Diabetes_012, positive = "Diabetes")
+```
+
+```{r}
+# BMI is numeric (continuous) — should NOT be in the factor list
+# Age is numeric (1-13 scale) — should NOT be in the factor list
+# Only convert TRUE binary (0/1) variables
+
+cols_to_factor <- c("HighBP","HighChol","CholCheck","Smoker","Stroke",
+                    "HeartDiseaseorAttack","PhysActivity","Fruits","Veggies",
+                    "HvyAlcoholConsump","AnyHealthcare","NoDocbcCost",
+                    "DiffWalk","Sex")
+
+train_rf <- train_balanced %>%
+  mutate(across(all_of(cols_to_factor), factor)) %>%
+  mutate(BMI       = as.numeric(BMI),        # keep as number
+         Age       = as.numeric(Age),        # keep as number
+         GenHlth   = as.numeric(GenHlth),    # scale 1-5, keep numeric
+         MentHlth  = as.numeric(MentHlth),   # scale 0-30, keep numeric
+         PhysHlth  = as.numeric(PhysHlth),   # scale 0-30, keep numeric
+         Education = as.numeric(Education),  # scale 1-6, keep numeric
+         Income    = as.numeric(Income))     # scale 1-8, keep numeric
+
+test_rf <- test_data %>%
+  mutate(across(all_of(cols_to_factor), factor)) %>%
+  mutate(BMI       = as.numeric(BMI),
+         Age       = as.numeric(Age),
+         GenHlth   = as.numeric(GenHlth),
+         MentHlth  = as.numeric(MentHlth),
+         PhysHlth  = as.numeric(PhysHlth),
+         Education = as.numeric(Education),
+         Income    = as.numeric(Income))
+
+# Confirm variable types look right
+str(train_rf)
+
+```
+
+
+
+```{r}
+# Step 1: Round all binary columns to 0 or 1 first, THEN factor
+cols_to_factor <- c("HighBP","HighChol","CholCheck","Smoker","Stroke",
+                    "HeartDiseaseorAttack","PhysActivity","Fruits","Veggies",
+                    "HvyAlcoholConsump","AnyHealthcare","NoDocbcCost",
+                    "DiffWalk","Sex")
+
+train_rf <- train_balanced %>%
+  mutate(across(all_of(cols_to_factor), ~ factor(round(as.numeric(.))))) %>%
+  mutate(BMI       = as.numeric(BMI),
+         Age       = as.numeric(Age),
+         GenHlth   = as.numeric(GenHlth),
+         MentHlth  = as.numeric(MentHlth),
+         PhysHlth  = as.numeric(PhysHlth),
+         Education = as.numeric(Education),
+         Income    = as.numeric(Income))
+
+test_rf <- test_data %>%
+  mutate(across(all_of(cols_to_factor), ~ factor(round(as.numeric(.))))) %>%
+  mutate(BMI       = as.numeric(BMI),
+         Age       = as.numeric(Age),
+         GenHlth   = as.numeric(GenHlth),
+         MentHlth  = as.numeric(MentHlth),
+         PhysHlth  = as.numeric(PhysHlth),
+         Education = as.numeric(Education),
+         Income    = as.numeric(Income))
+
+# Confirm — HighBP should now show Factor w/ 2 levels "0","1"
+str(train_rf)
+
+```
+
+```{r random-forest-fixed}
+set.seed(42)
+rf_model2 <- randomForest(Diabetes_012 ~ .,
+                          data       = train_rf,
+                          ntree      = 100,
+                          importance = TRUE)
+
+# Evaluate on test data
+rf_class2 <- predict(rf_model2, newdata = test_rf, type = "class")
+confusionMatrix(rf_class2, test_rf$Diabetes_012, positive = "Diabetes")
+```
+```{r variable-importance}
+
+# Variable importance plot — answers "which risk factors matter most?"
+varImpPlot(rf_model2,
+           main = "Random Forest — Variable Importance for Diabetes Prediction",
+           col  = "steelblue",
+           pch  = 19)
+```
+
+```{r roc-curves}
+library(pROC)
+
+# Get probabilities from all 3 models
+prob_log_imbal <- predict(full_model,     newdata = test_data,  type = "response")
+prob_log_smote <- predict(balanced_model, newdata = test_data,  type = "response")
+prob_rf        <- predict(rf_model2,      newdata = test_rf,    type = "prob")[,"Diabetes"]
+
+# Build ROC objects
+roc1 <- roc(test_data$Diabetes_012,  prob_log_imbal, levels = c("None","Diabetes"))
+roc2 <- roc(test_data$Diabetes_012,  prob_log_smote, levels = c("None","Diabetes"))
+roc3 <- roc(test_rf$Diabetes_012,    prob_rf,        levels = c("None","Diabetes"))
+
+# Plot all three
+plot(roc1, col="grey50", lwd=2, main="ROC Curve Comparison — All Models")
+plot(roc2, col="blue",   lwd=2, add=TRUE)
+plot(roc3, col="red",    lwd=2, add=TRUE)
+abline(a=0, b=1, lty=2, col="black")  # random baseline
+
+legend("bottomright",
+       legend = c(
+         paste("Logistic imbalanced  AUC =", round(auc(roc1), 3)),
+         paste("Logistic SMOTE       AUC =", round(auc(roc2), 3)),
+         paste("Random Forest        AUC =", round(auc(roc3), 3))
+       ),
+       col = c("grey50","blue","red"), lwd = 2)
+```
+```{r retrain-all-models}
+# Quickly retrain logistic models (takes seconds)
+full_model     <- glm(Diabetes_012 ~ ., data = train_data,     family = binomial)
+balanced_model <- glm(Diabetes_012 ~ ., data = train_balanced, family = binomial)
+
+# NOW run the ROC curves
+library(pROC)
+
+prob_log_imbal <- predict(full_model,     newdata = test_data, type = "response")
+prob_log_smote <- predict(balanced_model, newdata = test_data, type = "response")
+prob_rf        <- predict(rf_model2,      newdata = test_rf,   type = "prob")[,"Diabetes"]
+
+roc1 <- roc(test_data$Diabetes_012, prob_log_imbal, levels = c("None","Diabetes"))
+roc2 <- roc(test_data$Diabetes_012, prob_log_smote, levels = c("None","Diabetes"))
+roc3 <- roc(test_rf$Diabetes_012,   prob_rf,        levels = c("None","Diabetes"))
+
+plot(roc1, col="grey50", lwd=2, main="ROC Curve Comparison — All Models")
+plot(roc2, col="blue",   lwd=2, add=TRUE)
+plot(roc3, col="red",    lwd=2, add=TRUE)
+abline(a=0, b=1, lty=2, col="black")
+
+legend("bottomright",
+       legend = c(
+         paste("Logistic imbalanced AUC =", round(auc(roc1), 3)),
+         paste("Logistic SMOTE      AUC =", round(auc(roc2), 3)),
+         paste("Random Forest       AUC =", round(auc(roc3), 3))
+       ),
+       col = c("grey50","blue","red"), lwd = 2)
+```
+
+```
+
+
+```
+
+
